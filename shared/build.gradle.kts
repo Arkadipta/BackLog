@@ -36,6 +36,9 @@ kotlin {
             api(libs.kotlinx.coroutines.core)
             implementation(libs.sqldelight.runtime)
             implementation(libs.sqldelight.coroutines)
+            implementation(libs.cryptography.core)
+            // JDK on jvm/Android; CryptoKit + CommonCrypto on macOS.
+            implementation(libs.cryptography.provider.optimal)
         }
         commonTest.dependencies {
             implementation(kotlin("test"))
