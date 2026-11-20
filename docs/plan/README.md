@@ -54,7 +54,7 @@ Gate: the spike proves that the SQLDelight → `Flow` → SKIE → SwiftUI chain
 
 | ID | Task | Depends on | Status |
 | --- | --- | --- | --- |
-| 1.1 | Core primitives: UUIDv7/v5, HLC, fractional keys | 0.2 | todo |
+| 1.1 | Core primitives: UUIDv7/v5, HLC, fractional keys | 0.2 | done |
 | 1.2 | Schema, migrations and drivers | 1.1 | todo |
 | 1.3 | Change engine: local writes and field merge | 1.2 | todo |
 | 1.4 | Repositories: writes, integrity rules, undo | 1.3 | todo |
