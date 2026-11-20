@@ -22,7 +22,42 @@ Swift sees every public type in this module. Follow 0.2's notes on how Kotlin ty
 - HLC string order matching clock order (a property test over random clocks), and counter overflow.
 - New fractional keys always falling strictly between their neighbours, and 1,000 random inserts staying sorted.
 
-**Notes:** _(filled in by the session)_
+**Notes:**
+- **Where things are.** Everything is `internal`, so none of it reaches Swift. Widen an item only when an app needs it.
+
+  | Item | Location |
+  | --- | --- |
+  | `Clock`, `SystemClock` and `TestClock` | `com.backlog.time` |
+  | `UuidV7Generator`, `uuidV5`, `NS_BACKLOG`, and helpers that parse and format UUIDs and read their version, variant and timestamp | `com.backlog.id` |
+  | `Hlc` and `HlcClock` | `com.backlog.sync` |
+  | `FractionalIndex.keyBetween` and `keysBetween` | `com.backlog.order` |
+
+  `TestClock` is in `commonMain`, not `commonTest`, so that the two-device client in 3.4 can drive skewed clocks.
+- **`Clock` returns epoch ms (`nowMillis(): Long`), not `Instant`.** Every stored instant is UTC ms, and this keeps `kotlin.time`'s experimental `Instant` and `Clock` out of the shared API. Wrap the value with `Instant.fromEpochMilliseconds` where kotlinx-datetime needs one.
+- **`NS_BACKLOG` = `457aad8b-b487-40e0-bafc-670f5c162284`.** It's a random v4 UUID. The Inbox id `uuidV5(NS_BACKLOG, "inbox")` is `8494b556-8818-5209-99e5-3f3bce5d2b0f`, and a test pins it against Python's `uuid.uuid5`. Never change either value (D5).
+- **cryptography-kotlin 0.6.0** (`cryptography-core` + `cryptography-provider-optimal`) is in the catalog and pulls in kotlinx-io 0.9.0. It was built against Kotlin 2.3.20, which is fine with 2.4.21. The optimal provider uses the JDK on jvm and Android, and CryptoKit plus CommonCrypto on macOS. 3.3 gets HKDF and AES-GCM from it without adding anything.
+  - `SHA1` needs `@OptIn(DelicateCryptographyApi::class)`. The opt-in is scoped to the one hasher.
+  - `CryptographyProvider.Default` resolves on all three test targets.
+  - The Mac app links and builds with the dependency. But no app code calls SHA-1 yet, so dead-code stripping may have left the CryptoKit part out. When 1.2 seeds the Inbox from the app, check the first launch on the Mac.
+- **UUIDv7** uses RFC 9562 §6.2 method 1. `rand_a` is a 12-bit counter, seeded below 2048 on each new millisecond. When the counter overflows, the timestamp moves 1 ms ahead. If the wall clock goes backwards, the generator keeps counting from the last id. So one generator's ids are strictly increasing, which a test checks over 5,000 ids with random clock jumps, backward ones included. Randomness comes from `CryptographyRandom`.
+- **HLC.**
+  - `HlcClock(deviceId, clock, last)`. `last` restores the clock at launch from the highest stored stamp; in 1.3 that's the max of `field_clock`.
+  - `tick()` is for local edits, `receive(remote)` for applying remote changes, and `current()` reads the clock without ticking.
+  - State is packed into one `AtomicLong`, (wall << 16) | counter, so the clock is lock-free and thread-safe. `kotlin.concurrent.atomics` needs `@OptIn(ExperimentalAtomicApi::class)`.
+  - A remote stamp far in the future is adopted as is. D17's `clock_skew` handling on the Worker is the guard against that.
+- **HLC encoding (D11).**
+  - The counter is written as 4 **lower-case** hex digits. `decode` rejects upper case, so each stamp has exactly one encoding.
+  - Device ids are limited to `[0-9A-Za-z_-]`. That's ASCII, so Kotlin's UTF-16 order and SQLite's byte order agree. UUID device ids fit.
+  - The wall part is at most `9999999999999` (13 digits).
+  - `Hlc.ZERO` = `0000000000000-0000-0` is the seed stamp for D5.
+- **Fractional index.** This is a port of `fractional-indexing`, compared line by line with the 3.4.0 source; its tests' vectors pass. Two deviations, documented in the KDoc:
+  - `a > b` throws; upstream 3.4 swaps the arguments.
+  - Characters outside base-62 are rejected.
+
+  Keys stay short for common moves. 10,000 appends or prepends give keys of 4 characters or fewer. 1,000 inserts in a row at the same spot grow a key by about one character per 6 inserts.
+- **Evidence, 21 Nov 2026.**
+  - `./gradlew :shared:allTests :shared:testAndroidHostTest :androidApp:assembleDebug`: BUILD SUCCESSFUL. 31 tests on each of jvm, macosArm64 and the Android host, with 0 failures. The 31 are `UuidsTest` 9, `HlcTest` 14 and `FractionalIndexTest` 6, plus the 2 earlier tests.
+  - `xcodegen generate && xcodebuild -scheme BackLog build`: BUILD SUCCEEDED.
 
 ---
 
