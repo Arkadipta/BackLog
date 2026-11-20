@@ -1,0 +1,5 @@
+selectValue:
+SELECT value FROM local_meta WHERE key = ?;
+
+insertIfAbsent:
+INSERT OR IGNORE INTO local_meta(key, value) VALUES (?, ?);

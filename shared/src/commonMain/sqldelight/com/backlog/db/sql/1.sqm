@@ -1,0 +1,173 @@
+-- Schema version 1 (task 1.2). The schema is derived from the migrations, so
+-- this file is the whole initial schema; a later N.sqm migrates version N to
+-- N + 1. Never edit a released migration: add the next one, then regenerate
+-- the N.db snapshot (see shared/build.gradle.kts).
+--
+-- Sync rules that shape these tables:
+-- * No foreign keys and no CHECK constraints. Fields arrive one at a time
+--   from other devices and in any order (a task can arrive before its list),
+--   so a constraint could fail a whole sync batch. The repositories enforce
+--   the integrity rules, and the change engine repairs merges (D14).
+-- * Every NOT NULL column has a default, so remote apply can create a missing
+--   row from its id alone and then set fields one by one.
+-- * `updated_at` is local bookkeeping, not a synced field. `deleted_at` is
+--   synced like any other field, which makes a delete sticky.
+
+-- User data ------------------------------------------------------------------
+
+CREATE TABLE list (
+    id TEXT NOT NULL PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    -- A palette token (sky, mint, amber, coral, violet, slate, rose, teal), never a hex value.
+    color TEXT NOT NULL DEFAULT 'sky',
+    -- SF Symbol or Material icon name.
+    icon TEXT,
+    sort_key TEXT NOT NULL DEFAULT '',
+    -- 1 for the Inbox only. Its id is fixed: uuidV5(NS_BACKLOG, "inbox") (D5).
+    is_inbox INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL DEFAULT 0,
+    deleted_at INTEGER
+);
+
+CREATE TABLE task (
+    -- Local only, never synced. It is the rowid that task_fts points at. A
+    -- declared INTEGER PRIMARY KEY keeps the rowid stable across VACUUM,
+    -- which an implicit rowid is not.
+    local_id INTEGER PRIMARY KEY,
+    -- The task's real identity (UUIDv7, or UUIDv5 for next instances, D21).
+    id TEXT NOT NULL UNIQUE,
+    -- Sub-tasks copy their parent's list_id.
+    list_id TEXT NOT NULL DEFAULT '',
+    -- NULL for a top-level task. Two levels at most, enforced in repo/.
+    parent_id TEXT,
+    title TEXT NOT NULL DEFAULT '',
+    -- Markdown source. Top-level tasks only.
+    notes_md TEXT,
+    -- 0 none, 1 low, 2 medium, 3 high.
+    priority INTEGER NOT NULL DEFAULT 0,
+    -- Local date YYYY-MM-DD. Floating, with due_time (D6).
+    due_date TEXT,
+    -- Minutes after midnight; NULL means all-day.
+    due_time INTEGER,
+    -- IANA zone, set whenever reminder_at is set (D6).
+    time_zone TEXT,
+    -- UTC epoch ms.
+    reminder_at INTEGER,
+    -- Minutes before the due time (or 09:00 for all-day tasks). When set,
+    -- reminder_at follows the due date and time (D7).
+    reminder_offset_min INTEGER,
+    -- RFC 5545 RRULE subset.
+    rrule TEXT,
+    -- 'due' or 'completion'.
+    repeat_from TEXT NOT NULL DEFAULT 'due',
+    -- The id of the series' first instance (D21).
+    series_id TEXT,
+    -- UTC epoch ms; NULL means open.
+    completed_at INTEGER,
+    -- Order within the list, or within the parent for sub-tasks. Ties go by id (D8).
+    sort_key TEXT NOT NULL DEFAULT '',
+    updated_at INTEGER NOT NULL DEFAULT 0,
+    deleted_at INTEGER
+);
+
+-- Lists in sidebar order.
+CREATE INDEX list_order ON list(sort_key, id) WHERE deleted_at IS NULL;
+
+-- A list's tasks, top level first (parent_id IS NULL), in order.
+CREATE INDEX task_by_list ON task(list_id, parent_id, sort_key, id) WHERE deleted_at IS NULL;
+
+-- A task's sub-tasks in order, and the done/total counts.
+CREATE INDEX task_by_parent ON task(parent_id, sort_key, id) WHERE parent_id IS NOT NULL AND deleted_at IS NULL;
+
+-- Today and Planned: open, dated tasks by date and time.
+CREATE INDEX task_by_due ON task(due_date, due_time) WHERE due_date IS NOT NULL AND completed_at IS NULL AND deleted_at IS NULL;
+
+-- The reminder planner: open tasks with a reminder, by time.
+CREATE INDEX task_by_reminder ON task(reminder_at) WHERE reminder_at IS NOT NULL AND completed_at IS NULL AND deleted_at IS NULL;
+
+-- Tombstones, for purging (6.1).
+CREATE INDEX list_tombstones ON list(deleted_at) WHERE deleted_at IS NOT NULL;
+CREATE INDEX task_tombstones ON task(deleted_at) WHERE deleted_at IS NOT NULL;
+
+-- Full-text search over titles and notes. FTS4, not FTS5: Android 12's
+-- SQLite (3.32, API 31) has no FTS5 module (D9). External content: the index
+-- reads title and notes_md from task by rowid (= local_id), so the text isn't
+-- stored twice. Tombstoned rows stay indexed; search queries join task and
+-- filter them out.
+CREATE VIRTUAL TABLE task_fts USING fts4(
+    content="task",
+    title,
+    notes_md,
+    tokenize=unicode61 "remove_diacritics=2",
+    prefix="2,3"
+);
+
+-- FTS4 removes a row's old tokens by reading the content table, so the
+-- deletes run BEFORE the row changes and the inserts AFTER.
+CREATE TRIGGER task_fts_before_update BEFORE UPDATE OF title, notes_md ON task BEGIN
+    DELETE FROM task_fts WHERE docid = old.local_id;
+END;
+
+CREATE TRIGGER task_fts_after_update AFTER UPDATE OF title, notes_md ON task BEGIN
+    INSERT INTO task_fts(docid, title, notes_md) VALUES (new.local_id, new.title, new.notes_md);
+END;
+
+CREATE TRIGGER task_fts_before_delete BEFORE DELETE ON task BEGIN
+    DELETE FROM task_fts WHERE docid = old.local_id;
+END;
+
+CREATE TRIGGER task_fts_after_insert AFTER INSERT ON task BEGIN
+    INSERT INTO task_fts(docid, title, notes_md) VALUES (new.local_id, new.title, new.notes_md);
+END;
+
+-- Sync bookkeeping -----------------------------------------------------------
+
+-- The latest HLC per synced field (D11 encoding). A missing row means
+-- Hlc.ZERO. Seeds (D5) are written here at Hlc.ZERO and never logged.
+CREATE TABLE field_clock (
+    tbl TEXT NOT NULL,
+    row_id TEXT NOT NULL,
+    field TEXT NOT NULL,
+    hlc TEXT NOT NULL,
+    PRIMARY KEY (tbl, row_id, field)
+) WITHOUT ROWID;
+
+-- At launch the HLC clock restarts from the highest stamp (1.1).
+CREATE INDEX field_clock_by_hlc ON field_clock(hlc);
+
+-- Append-only log of local changes; it is also the outbox (D12). AUTOINCREMENT
+-- so that a seq is never reused after old rows are pruned, because each
+-- transport's cursor in sync_state refers to one.
+CREATE TABLE change_log (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    tbl TEXT NOT NULL,
+    row_id TEXT NOT NULL,
+    field TEXT NOT NULL,
+    -- The new value in its JSON encoding (1.3); JSON null for a cleared field.
+    value TEXT NOT NULL,
+    hlc TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    -- notes_md only: the field's HLC just before the edit (D13).
+    base_hlc TEXT
+);
+
+-- A push sends the latest change per (tbl, row_id, field) since the cursor (D12).
+CREATE INDEX change_log_by_field ON change_log(tbl, row_id, field, seq);
+
+-- One row per configured transport ('cloudflare', 'syncthing', 'caldav').
+CREATE TABLE sync_state (
+    transport TEXT NOT NULL PRIMARY KEY,
+    -- The highest change_log.seq this transport has pushed.
+    pushed_seq INTEGER NOT NULL DEFAULT 0,
+    -- Opaque to the engine, owned by the transport: the Worker's seq, one
+    -- (file, offset) per peer for Syncthing (D28), a sync token for CalDAV.
+    -- NULL means never pulled, so the next pull bootstraps.
+    pull_cursor TEXT,
+    last_synced_at INTEGER
+);
+
+-- Device-local settings that never sync, such as this device's id ('device_id').
+CREATE TABLE local_meta (
+    key TEXT NOT NULL PRIMARY KEY,
+    value TEXT NOT NULL
+);

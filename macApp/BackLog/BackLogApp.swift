@@ -4,7 +4,7 @@ import SwiftUI
 struct BackLogApp: App {
     var body: some Scene {
         WindowGroup("BackLog") {
-            SpikeView()
+            StatusView()
         }
     }
 }

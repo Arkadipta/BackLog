@@ -1,0 +1,10 @@
+-- Seeds (D5): rows every device creates identically on its own, with each
+-- field's clock at Hlc.ZERO so that any real edit wins. INSERT OR IGNORE
+-- makes them safe to run on every open, and they never touch change_log.
+
+insertListIfAbsent:
+INSERT OR IGNORE INTO list(id, name, color, icon, sort_key, is_inbox, updated_at, deleted_at)
+VALUES (:id, :name, :color, NULL, :sort_key, :is_inbox, 0, NULL);
+
+insertFieldClockIfAbsent:
+INSERT OR IGNORE INTO field_clock(tbl, row_id, field, hlc) VALUES (?, ?, ?, ?);
