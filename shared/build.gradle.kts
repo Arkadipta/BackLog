@@ -1,6 +1,8 @@
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.android.kmp.library)
+    alias(libs.plugins.sqldelight)
+    alias(libs.plugins.skie)
 }
 
 kotlin {
@@ -18,11 +20,47 @@ kotlin {
         withHostTest {}
     }
     jvm()
-    macosArm64()
+    macosArm64 {
+        binaries.framework {
+            // Swift imports the shared core as `BackLogCore` (D1).
+            baseName = "BackLogCore"
+            // Static: linked into the app binary, so nothing to embed or re-sign.
+            // The app links libsqlite3 itself (OTHER_LDFLAGS in macApp/project.yml).
+            isStatic = true
+        }
+    }
 
     sourceSets {
+        commonMain.dependencies {
+            // `api`: Flow is part of the public API the apps consume.
+            api(libs.kotlinx.coroutines.core)
+            implementation(libs.sqldelight.runtime)
+            implementation(libs.sqldelight.coroutines)
+        }
         commonTest.dependencies {
             implementation(kotlin("test"))
+            implementation(libs.kotlinx.coroutines.test)
+        }
+        androidMain.dependencies {
+            implementation(libs.sqldelight.android.driver)
+        }
+        // The host test runs on a plain JVM, so it uses the JDBC driver, not the Android one.
+        getByName("androidHostTest").dependencies {
+            implementation(libs.sqldelight.sqlite.driver)
+        }
+        jvmMain.dependencies {
+            implementation(libs.sqldelight.sqlite.driver)
+        }
+        macosMain.dependencies {
+            implementation(libs.sqldelight.native.driver)
+        }
+    }
+}
+
+sqldelight {
+    databases {
+        create("BackLogDatabase") {
+            packageName.set("com.backlog.db")
         }
     }
 }

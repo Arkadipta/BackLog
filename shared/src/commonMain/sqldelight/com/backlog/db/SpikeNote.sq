@@ -1,0 +1,14 @@
+-- Throwaway table for the 0.2 interop spike. Task 1.2 deletes it.
+CREATE TABLE spike_note (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    text TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    -- Nullable on purpose, to see how a nullable Long reaches Swift.
+    done_at INTEGER
+);
+
+selectAll:
+SELECT * FROM spike_note ORDER BY created_at DESC, id DESC;
+
+insert:
+INSERT INTO spike_note(text, created_at) VALUES (?, ?);
