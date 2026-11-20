@@ -38,6 +38,8 @@ The [spec](../../Personal_Todo_App_Spec_v1.md) is still the main reference. This
 
 **D9. Search index.** Android's built-in SQLite isn't guaranteed to include FTS5. In 1.2, check for FTS5 on an API 31 emulator and on macOS. If either lacks it, use FTS4, which both have. Record the outcome here.
 
+**Outcome (1.2, 21 Nov 2026): FTS4.** Android 12 (API 31) ships SQLite 3.32.2 without FTS5: creating the FTS5 schema failed with `no such module: fts5`. macOS 27.2's system SQLite (3.54.0) and sqlite-jdbc (3.53.4) have both modules. `task_fts` is therefore an external-content FTS4 table over `task.title` + `task.notes_md`, using the `unicode61` tokenizer with `remove_diacritics=2` and prefix indexes for 2 and 3 characters. FTS4 has no `bm25()`, so 1.5 has to rank results itself, for example with `matchinfo()` or open-first ordering. If minSdk ever rises to a release whose SQLite has FTS5, a migration can switch.
+
 **D10. Today and Planned.** "Today" is the device's current local date. It's re-evaluated at midnight and on a time-zone change. Planned has five groups:
 - Overdue: before today.
 - Today.
