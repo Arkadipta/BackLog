@@ -46,9 +46,9 @@ Status values: `todo`, `doing`, `done`.
 | ID | Task | Depends on | Status |
 | --- | --- | --- | --- |
 | 0.1 | Toolchain and monorepo skeleton | none | done |
-| 0.2 | Kotlin ↔ Swift walking skeleton (risk spike) | 0.1 | todo |
+| 0.2 | Kotlin ↔ Swift walking skeleton (risk spike) | 0.1 | done |
 
-Gate: the spike proves that the SQLDelight → `Flow` → SKIE → SwiftUI chain works on macOS. If it doesn't, choose the spec's GRDB fallback before starting phase 1.
+Gate: the spike proves that the SQLDelight → `Flow` → SKIE → SwiftUI chain works on macOS. If it doesn't, choose the spec's GRDB fallback before starting phase 1. **Result (0.2): go.** The chain works, so the GRDB fallback isn't needed.
 
 ### Phase 1: shared core ([phase-1-shared-core.md](phase-1-shared-core.md))
 
