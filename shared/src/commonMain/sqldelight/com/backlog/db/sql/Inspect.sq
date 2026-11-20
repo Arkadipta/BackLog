@@ -1,0 +1,19 @@
+-- Read-only queries for the smoke tests and the apps' status screens until
+-- the repositories (1.4) and view queries (1.5) replace them.
+
+liveLists:
+SELECT * FROM list WHERE deleted_at IS NULL ORDER BY sort_key, id;
+
+fieldClocks:
+SELECT field, hlc FROM field_clock WHERE tbl = ? AND row_id = ? ORDER BY field;
+
+-- Full-text hits on live tasks, open ones first. `query` is FTS4 MATCH
+-- syntax. FTS4 has no bm25(); 1.5 owns the real ranking.
+searchLive:
+SELECT task.id, snippet(task_fts, '[', ']', '…', -1, 8) AS snippet
+FROM task_fts JOIN task ON task.local_id = task_fts.docid
+WHERE task_fts MATCH :query AND task.deleted_at IS NULL
+ORDER BY task.completed_at IS NOT NULL, task.id;
+
+taskById:
+SELECT * FROM task WHERE id = ?;

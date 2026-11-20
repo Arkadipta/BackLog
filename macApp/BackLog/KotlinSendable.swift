@@ -1,8 +1,9 @@
 import BackLogCore
 
 // Kotlin classes reach Swift as plain ObjC classes, which Swift 6 treats as
-// non-Sendable, so calling a SKIE `async` method on one from the main actor is
-// a "sending risks data race" error. The shared repositories are thread-safe
-// (SQLDelight driver + coroutine dispatcher), so declare that here, one line
-// per repository type.
-extension SpikeRepository: @retroactive @unchecked Sendable {}
+// non-Sendable, so passing one across actors (a SKIE `async` method's
+// receiver or result) is a "sending risks data race" error. Declare the
+// thread-safe and immutable shared types here, one line per type.
+
+// An immutable data class, returned from an async function to the main actor.
+extension DatabaseStatus: @retroactive @unchecked Sendable {}

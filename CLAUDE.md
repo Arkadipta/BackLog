@@ -48,13 +48,17 @@ The shared module uses AGP 9's Android-KMP library plugin (`com.android.kotlin.m
 | Mac app | `cd macApp && xcodegen generate && xcodebuild -scheme BackLog build` (app in `~/Library/Developer/Xcode/DerivedData/BackLog-*/Build/Products/Debug/`) |
 | Worker | Added in task 3.1: `cd worker && npx wrangler …` |
 
-Use the `BackLog_API_36` AVD (8 GB data partition), made in 0.2. `Medium_Phone_API_36` is full and can't install the APK. Start it with `~/Library/Android/sdk/emulator/emulator -avd BackLog_API_36`.
+Use the `BackLog_API_36` AVD (8 GB data partition), made in 0.2. `Medium_Phone_API_36` is full and can't install the APK. Start it with `~/Library/Android/sdk/emulator/emulator -avd BackLog_API_36 -no-audio`. `-no-audio` stops macOS asking for microphone access, a prompt that can hang the emulator's boot.
+
+`BackLog_API_31` (Android 12, the minSdk, made in 1.2) runs the oldest SQLite the app supports: 3.32.2, with FTS4 and no FTS5 (D9). Check SQL that might be version-sensitive there. Its `/system/bin/sqlite3` is the same build: after `adb root`, run it on a copy of the app's database, and copy and delete the `-wal`/`-shm` files along with the database.
 
 During macOS linking, Kotlin/Native prints many `warning: could not open …/stdlib-per-file-cache/….a(….a.o)` lines. This is linker noise with the Xcode 27 toolchain, and the tests still run. Filter it with `grep -v 'could not open'`.
 
 ## Layout
 
 - `shared/`: KMP module with `android`, `jvm` and `macosArm64` targets. Code goes under `com.backlog` in `commonMain`, `commonTest`, `androidMain`, `jvmMain` and `macosMain`. Swift will import it as `BackLogCore` (D1).
+  - Schema and queries are in `commonMain/sqldelight/com/backlog/db/sql/`. `1.sqm` is the initial schema, and the next change is `2.sqm`. Never edit a released `.sqm`.
+  - SKIE hides everything under `com.backlog.db` from Swift, because the generated `Task` and `List` would shadow Swift's `Task` and SwiftUI's `List`. Apps use the models in `com.backlog.model`. Never name a public Kotlin type `Task` or `List`.
 - `androidApp/`: Compose app, `applicationId` `com.backlog.app`, minSdk 31.
 - `macApp/`: `project.yml` is the source of truth, and the generated `.xcodeproj` is gitignored (D3). Never edit `.pbxproj`. Rerun `xcodegen generate` after adding or removing Swift files.
 - `worker/`: from task 3.1.

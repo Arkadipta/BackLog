@@ -82,7 +82,59 @@ Swift sees every public type in this module. Follow 0.2's notes on how Kotlin ty
 - Driver smoke tests pass on jvm and macosArm64.
 - FTS5 vs FTS4 has been checked on an API 31 emulator and on macOS, and the result is recorded in D9.
 
-**Notes:** _(filled in by the session)_
+**Notes:**
+- **Where things are.**
+
+  | Item | Location |
+  | --- | --- |
+  | Schema (`1.sqm`) and query files (`*.sq`) | `shared/src/commonMain/sqldelight/com/backlog/db/sql/` |
+  | Generated rows and queries | `com.backlog.db.sql` (`Task`, `List`, `InspectQueries`, …). `BackLogDatabase` itself is in `com.backlog.db` |
+  | `LocalDatabase.open(driver, clock)`, `Seeds`, `MetaKeys`, `EmptySchema` | `com.backlog.db` (internal) |
+  | Row → model mapping (`toModel()`), `probeFullText()`, `sqliteVersion()`, `userVersion()` | `com.backlog.db` (internal) |
+  | Driver factories: `createAndroidDriver(context)`, `createMacDriver()`, `createJvmDriver(path)` | `androidMain`, `macosMain` and `jvmMain`, package `com.backlog.db` (internal) |
+  | Models: `TaskList`, `TaskItem`, `Reminder`, `Priority`, `RepeatFrom`, `ListColor` | `com.backlog.model` (public) |
+  | `DatabaseStatus` and `loadDatabaseStatus()` | `com.backlog.diagnostics` (public; a placeholder that 2.1 and 4.1 delete) |
+
+  The `.sq` files live in a `sql/` sub-package on purpose. Generated row classes are named after their tables, so a file in the same package as the generated `List` resolves `List<T>` to the row class, not `kotlin.collections.List`.
+- **Hidden from Swift.** SQLDelight's generated code is public. Its `Task` and `List` would shadow `_Concurrency.Task` and `SwiftUI.List` in the Mac app. `shared/build.gradle.kts` applies `SkieVisibility.Level.Private` to the `com.backlog.db` package prefix. SKIE marks those classes `Availability: nonswift` in the API notes. A type-check against the framework confirmed that `Task { }` and `List(…)` still resolve to the system types, and that `BackLogCore.Task` is "unavailable in Swift". So the model types are named `TaskItem` and `TaskList`; don't name a public type `Task` or `List`.
+- **Schema version is 2.** With `deriveSchemaFromMigrations`, `1.sqm` holds the whole initial schema, and `Schema.version` is the highest `N.sqm` + 1, because version 1 means an empty database. The next schema change is `2.sqm`, which makes version 3. Never edit `1.sqm` after this.
+- **Migration verification.** `verifyMigrations = true` makes code generation fail on any migration statement that doesn't compile against the schema before it. A test with a deliberately broken `2.sqm` failed the build with `2.sqm:2:16 No column found with name missing_column`. With a derived schema there's no separate `.sq` schema to diff, so no `N.db` snapshots are kept (`generate…Schema` doesn't exist in this mode). `DatabaseSchemaTest` checks at runtime that `Schema.create` and `Schema.migrate(1 → current)` give an identical `sqlite_master`.
+- **SQL dialect: `sqlite-3-30-dialect`.** Android 12, the minSdk, ships SQLite 3.32.2. That allows `NULLS FIRST/LAST` and partial indexes, but not `RETURNING` (3.35) or `UPDATE … FROM` (3.33).
+- **Schema rules that 1.3 builds on:**
+  - No foreign keys and no CHECK constraints, because fields arrive one at a time and in any order.
+  - Every NOT NULL column has a default, so `INSERT INTO task(id) VALUES (?)` creates a row that fields can then fill in. `DatabaseSchemaTest` covers this.
+  - Unknown values decode leniently in `toModel()`. Priority clamps to 0–3, and an unknown `repeat_from` or colour reads as the default. A bad date or time reads as null.
+  - `updated_at` is local bookkeeping, not a synced field. `deleted_at` is synced.
+  - `task.local_id INTEGER PRIMARY KEY` is local only and never synced or dumped. It's the rowid that `task_fts` points at. A declared integer key keeps rowids stable across `VACUUM`, which `FullTextTest.survivesVacuum` checks. `task.id` is `TEXT NOT NULL UNIQUE`, which costs the same as a TEXT primary key.
+  - `field_clock(tbl, row_id, field, hlc)` is `WITHOUT ROWID`. A missing row reads as `Hlc.ZERO`. It has an index on `hlc` for the launch-time `max(hlc)`.
+  - `change_log(seq AUTOINCREMENT, tbl, row_id, field, value, hlc, device_id, base_hlc)`. `value` is NOT NULL and holds the JSON encoding (`null` for a cleared field). 1.3 defines the encoding.
+  - `sync_state(transport PK, pushed_seq, pull_cursor, last_synced_at)`. `pull_cursor` is opaque text that the transport owns: the Worker's seq, D28's per-peer file and offset, or a CalDAV token. NULL means bootstrap.
+  - `local_meta(key, value)` holds settings that never sync. It currently has only `device_id`, a UUIDv7 made on first open. The device name for 3.x can go here too.
+- **Inbox seed (D5).** `LocalDatabase.open` runs `Seeds.apply` and the device-id insert in one transaction, both `INSERT OR IGNORE`, on every open. The seed is the Inbox row (`uuidV5(NS_BACKLOG, "inbox")`, "Inbox", `sky`, sort key `a0`, `is_inbox` 1, `updated_at` 0) plus `field_clock` rows at `Hlc.ZERO` for `Seeds.LIST_FIELDS` (name, color, icon, sort_key, is_inbox, deleted_at). Nothing goes to `change_log`. When 1.3 adds the field registry, derive `LIST_FIELDS` from it.
+- **Search (D9: FTS4).** `task_fts` is an external-content FTS4 table. Four triggers keep it current. The deletes run BEFORE an update or delete, because FTS4 reads the old text from `task`. The inserts run AFTER. Only `UPDATE OF title, notes_md` touches the index. Tombstoned rows stay indexed, so queries join `task` and filter `deleted_at IS NULL` (`Inspect.sq:searchLive`). Some FTS4 details that differ from FTS5:
+  - Options take no spaces around `=` (`content="task"`), or SQLite reports `unrecognized parameter`.
+  - The join key is `docid`.
+  - The signature is `snippet(task_fts, '[', ']', '…', -1, 8)`.
+  - `snippet()` can't share a SELECT with an aggregate.
+  - There's no `bm25()`.
+  - `INSERT INTO task_fts(task_fts) VALUES ('integrity-check')` raises "malformed" if the index drifts from `task`. The tests use it.
+- **Drivers.**
+  - Android: `AndroidSqliteDriver` with WAL turned on in `onConfigure`.
+  - Mac: `NativeSqliteDriver`, WAL by default, at `Application Support/BackLog/backlog.db`.
+  - jvm: `JdbcSqliteDriver(url, Properties(), Schema)`, which sets `user_version`.
+  - Tests use in-memory drivers through `expect fun testDriver()` / `emptyTestDriver()` in `commonTest/…/db/TestDrivers.kt`. The androidHostTest actual uses sqlite-jdbc, because the host test has no Android framework.
+  - The spike files, the `spike_note` table and `SpikeRepositoryTest` are gone.
+- **Apps.** Both spike screens are replaced by a status screen built on `loadDatabaseStatus()`. It shows the SQLite version, FTS4/FTS5 support, `user_version`, the lists, the device id and the file path. 2.1 and 4.1 replace it. `KotlinSendable.swift` now declares `DatabaseStatus` instead of `SpikeRepository`.
+- **Evidence, 21 Nov 2026.**
+  - `./gradlew :shared:allTests :shared:testAndroidHostTest :androidApp:assembleDebug :shared:verifySqlDelightMigration`: BUILD SUCCESSFUL. 53 tests on each of jvm, macosArm64 and the Android host, with 0 failures. The new ones are `DatabaseSchemaTest` 5, `LocalDatabaseTest` 5, `FullTextTest` 6, `FullTextSupportTest` 2 and `RowsTest` 5.
+  - The D9 probe printed by the tests: sqlite-jdbc 3.53.4 has FTS4 and FTS5, and the macOS system SQLite 3.54.0 has FTS4 and FTS5.
+  - Android, on a new `BackLog_API_31` AVD (android-31 google_apis arm64, 4 GB data): the first build, with FTS5, showed `SQLite 3.32.2 · FTS4 yes · FTS5 no` and `no such module: fts5`. After switching to FTS4, the app showed schema version 2 and "Inbox (inbox)", with no error. It also recovered from the earlier failed open. On a copy of the app's database, the device's own `sqlite3` 3.32.2 checked:
+    - an insert, rename and delete keep the index in step;
+    - `cafe` matches "Café";
+    - `gro*` matches;
+    - the snippet comes back as `ask about [mortgage]`;
+    - `integrity-check` passes.
+  - Mac: `xcodegen generate && xcodebuild -scheme BackLog build`: BUILD SUCCEEDED. The first launch on a fresh container database showed `SQLite 3.54.0 · FTS4 yes · FTS5 yes`, schema version 2 and "Inbox (inbox)". `sqlite3` on the container file showed `user_version` 2, `journal_mode` wal, the Inbox `8494b556-…` with sort key `a0`, six `field_clock` rows at `0000000000000-0000-0`, an empty `change_log` and the device id. After a relaunch there was still one list with the same device id. Because `uuidV5` (SHA-1 through CryptoKit) ran at launch, 1.1's question about dead-code stripping is answered: it works.
 
 ---
 
