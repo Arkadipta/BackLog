@@ -1,0 +1,71 @@
+# Source of truth for the Mac app's Xcode project (D3). Generate with
+# `xcodegen generate`; the .xcodeproj is gitignored, so never edit .pbxproj.
+name: BackLog
+options:
+  bundleIdPrefix: com.backlog
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    # The shared framework is built for macosArm64 only.
+    ARCHS: arm64
+    DEVELOPMENT_TEAM: 8WUD8HUYH5 # Personal Team
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  BackLog:
+    type: application
+    platform: macOS
+    sources:
+      - path: BackLog
+    entitlements:
+      path: BackLog/BackLog.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.backlog.app
+        PRODUCT_NAME: BackLog
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: BackLog
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+        ENABLE_HARDENED_RUNTIME: YES
+        # The Gradle phase below runs outside Xcode's script sandbox.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        # KMP direct integration: Gradle copies the static BackLogCore.framework here.
+        FRAMEWORK_SEARCH_PATHS: $(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)
+        # A static framework doesn't carry its link dependencies, so link SQLite here.
+        OTHER_LDFLAGS: -framework BackLogCore -lsqlite3
+        # sqliter's cinterop wrappers reference sqlite3_load_extension, which the
+        # macOS SDK's libsqlite3 doesn't export. Nothing calls them, so stripping
+        # dead code drops the references (Kotlin/Native's own links do the same).
+        DEAD_CODE_STRIPPING: YES
+    preBuildScripts:
+      - name: Build BackLogCore (Gradle)
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+          export ANDROID_HOME="$HOME/Library/Android/sdk"
+          cd "$SRCROOT/.."
+          # Drop the Kotlin/Native linker noise (see CLAUDE.md) but keep real errors.
+          log="$DERIVED_FILE_DIR/gradle-backlogcore.log"
+          mkdir -p "$DERIVED_FILE_DIR"
+          status=0
+          ./gradlew :shared:embedAndSignAppleFrameworkForXcode --quiet > "$log" 2>&1 || status=$?
+          grep -v 'could not open' "$log" || true
+          exit "$status"
+
+schemes:
+  BackLog:
+    build:
+      targets:
+        BackLog: all
+    run:
+      config: Debug
